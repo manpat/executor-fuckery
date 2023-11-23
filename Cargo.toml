@@ -1,0 +1,13 @@
+[package]
+name = "game-executor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+slotmap = "1.0.6"
+
+[dependencies.toybox]
+git = "https://github.com/manpat/toybox-rs.git"
+rev = "7ea98f3e41fc42ed7db866b309ac3ad55db85b8b"
