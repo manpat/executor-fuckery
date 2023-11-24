@@ -43,12 +43,17 @@ impl Executor {
 impl Executor {
 	pub fn poll(&mut self) {
 		// Update timers
-		// let now = Instant::now();
-		// let Queues{ update_queue, timer_queue, ..  } = self.queues.get_mut();
+		let now = Instant::now();
+		let Queues{ update_queue, timer_queue, ..  } = self.queues.get_mut();
 
-		// loop {
-		// 	let soonest = qu
-		// }
+		while let Some(soonest) = timer_queue.peek() {
+			if now < soonest.deadline {
+				break;
+			}
+
+			let Some(TimerEntry{task_id, ..}) = timer_queue.pop() else { unreachable!() };
+			update_queue.push(task_id);
+		}
 
 		// No mutable references can be held to self.queues while polling futures
 		let update_queue = std::mem::take(&mut self.queues.get_mut().update_queue);
