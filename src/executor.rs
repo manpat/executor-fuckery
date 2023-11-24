@@ -3,6 +3,7 @@ use std::task::{self, Poll};
 use std::pin::Pin;
 
 use std::cell::{Cell, UnsafeCell};
+use std::collections::BinaryHeap;
 
 
 slotmap::new_key_type! {
@@ -22,6 +23,7 @@ impl Executor {
 			queues: UnsafeCell::new(Queues {
 				update_queue: Vec::new(),
 				trigger_queue: Vec::new(),
+				timer_queue: BinaryHeap::new(),
 			})
 		}
 	}
@@ -29,7 +31,7 @@ impl Executor {
 	pub fn spawn(&mut self, f: impl Future<Output=()> + 'static) {
 		let task = Task::new(f);
 		let task_id = self.tasks.insert(task);
-		self.enqueue_update(task_id);
+		self.queues.get_mut().update_queue.push(task_id);
 	}
 
 	pub fn active_tasks(&self) -> usize {
@@ -40,14 +42,24 @@ impl Executor {
 
 impl Executor {
 	pub fn poll(&mut self) {
+		// Update timers
+		// let now = Instant::now();
+		// let Queues{ update_queue, timer_queue, ..  } = self.queues.get_mut();
+
+		// loop {
+		// 	let soonest = qu
+		// }
+
 		// No mutable references can be held to self.queues while polling futures
 		let update_queue = std::mem::take(&mut self.queues.get_mut().update_queue);
 		self.poll_ids(&update_queue);
 	}
 
 	pub fn trigger(&mut self) {
-		let trigger_queue = std::mem::take(&mut self.queues.get_mut().trigger_queue);
-		self.poll_ids(&trigger_queue);
+		assert!(QUEUES.get().is_null());
+
+		let queues = self.queues.get_mut();
+		queues.update_queue.append(&mut queues.trigger_queue);
 	}
 
 	fn poll_ids(&mut self, task_ids: &[TaskId]) {
@@ -80,13 +92,6 @@ impl Executor {
 	fn leave(&self) {
 		QUEUES.set(std::ptr::null_mut());
 	}
-
-	fn enqueue_update(&self, task_id: TaskId) {
-		let queues = self.queues.get();
-		unsafe {
-			(*queues).update_queue.push(task_id);
-		}
-	}
 }
 
 
@@ -99,7 +104,35 @@ thread_local! {
 struct Queues {
 	update_queue: Vec<TaskId>,
 	trigger_queue: Vec<TaskId>,
+
+	timer_queue: BinaryHeap<TimerEntry>,
 }
+
+
+use std::time::{Duration, Instant};
+use std::cmp::{Ord, PartialOrd, Ordering};
+
+#[derive(Eq, PartialEq)]
+struct TimerEntry {
+	deadline: Instant,
+	task_id: TaskId,
+}
+
+
+impl Ord for TimerEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+    	// Sort by _soonest_ deadline, then by task_id, to stay consistent with Eq
+        self.deadline.cmp(&other.deadline).reverse()
+        	.then_with(|| self.task_id.cmp(&other.task_id))
+    }
+}
+
+impl PartialOrd for TimerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 
 
 
@@ -135,9 +168,12 @@ impl Task {
 
 
 fn get_queues() -> &'static mut Queues {
-	let ptr = QUEUES.get();
-	assert!(!ptr.is_null(), "Polling future from outside of Executor context!");
-	unsafe { &mut *ptr }
+	unsafe {
+		let ptr = QUEUES.get().as_mut()
+			.expect("Polling future from outside of Executor context!");
+
+		&mut *ptr
+	}
 }
 
 
@@ -151,6 +187,15 @@ pub async fn next_update() {
 pub async fn on_trigger() {
 	schedule_on_queue(|queues, task_id| {
 		queues.trigger_queue.push(task_id);
+	}).await
+}
+
+pub async fn timeout(duration: Duration) {
+	schedule_on_queue(|queues, task_id| {
+		queues.timer_queue.push(TimerEntry {
+			deadline: Instant::now() + duration,
+			task_id,
+		});
 	}).await
 }
 
