@@ -18,10 +18,8 @@ impl App {
     fn new(ctx: &mut toybox::Context) -> anyhow::Result<App> {
         ctx.show_debug_menu = true;
 
-        let executor = Executor::new();
-
         Ok(App {
-            executor,
+            executor: Executor::new(),
         })
     }
 }
@@ -55,13 +53,12 @@ async fn my_task() {
         next_update().await;
     }
 
-    println!("waiting for trigger...");
+    println!("waiting for trigger or 3s timeout...");
 
-    on_trigger().await;
-
-    println!("Waiting for 3s...");
-
-    timeout(std::time::Duration::from_secs(3)).await;
+    when_first(
+        on_trigger(),
+        timeout(std::time::Duration::from_secs(3))
+    ).await;
 
     println!("done!");
 }

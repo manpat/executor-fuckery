@@ -70,7 +70,7 @@ impl Executor {
 	fn poll_ids(&mut self, task_ids: &[TaskId]) {
 		use std::task::Context;
 
-		self.enter();
+		QUEUES.set(self.queues.get());
 
 		for &task_id in task_ids {
 			let Some(task) = self.tasks.get_mut(task_id) else { continue };
@@ -86,15 +86,6 @@ impl Executor {
 		}
 
 		CURRENT_TASK.set(None);
-
-		self.leave();
-	}
-
-	fn enter(&self) {
-		QUEUES.set(self.queues.get());
-	}
-
-	fn leave(&self) {
 		QUEUES.set(std::ptr::null_mut());
 	}
 }
@@ -205,21 +196,72 @@ pub async fn timeout(duration: Duration) {
 }
 
 
-fn schedule_on_queue(f: impl FnOnce(&mut Queues, TaskId)) -> impl Future<Output=()> {
-	let mut scheduled = false;
+fn schedule_on_queue<F>(f: F) -> ScheduleOnQueue<F>
+	where F: FnOnce(&mut Queues, TaskId)
+{
+	ScheduleOnQueue(ScheduleOnQueueState::Pending(f))
+}
 
-	let mut f = Some(f);
 
-	poll_fn(move |_| {
-		match scheduled {
-			false => {
-				scheduled = true;
+
+struct ScheduleOnQueue<F>(ScheduleOnQueueState<F>);
+
+enum ScheduleOnQueueState<F> {
+	Pending(F),
+	Scheduled,
+}
+
+impl<F> Future for ScheduleOnQueue<F>
+	where F: FnOnce(&mut Queues, TaskId)
+{
+	type Output = ();
+
+	fn poll(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<()> {
+		match std::mem::replace(unsafe{ &mut self.get_unchecked_mut().0 }, ScheduleOnQueueState::Scheduled) {
+			ScheduleOnQueueState::Pending(f) => {
 				let current_task = CURRENT_TASK.get().unwrap();
-				f.take().unwrap()(get_queues(), current_task);
+				f(get_queues(), current_task);
 				Poll::Pending
 			}
 
-			true => Poll::Ready(())
+			ScheduleOnQueueState::Scheduled => Poll::Ready(())
 		}
-	})
+	}
+}
+
+impl<F> Drop for ScheduleOnQueue<F> {
+	fn drop(&mut self) {
+		inner_drop(unsafe { Pin::new_unchecked(self)});
+        fn inner_drop<F>(this: Pin<&mut ScheduleOnQueue<F>>) {
+            if matches!(this.0, ScheduleOnQueueState::Scheduled) {
+            	// Unschedule
+            }
+        }
+	}
+}
+
+
+
+pub async fn when_first<A, B>(mut a: impl Future<Output=A>, mut b: impl Future<Output=B>) {
+	poll_fn(|cx| {
+		let a = unsafe { Pin::new_unchecked(&mut a) };
+		let b = unsafe { Pin::new_unchecked(&mut b) };
+
+		match a.poll(cx) {
+			Poll::Pending => {}
+			Poll::Ready(_) => {
+				return Poll::Ready(())
+			}
+		}
+
+		match b.poll(cx) {
+			Poll::Pending => {}
+			Poll::Ready(_) => {
+				return Poll::Ready(())
+			}
+		}
+
+		Poll::Pending
+
+	}).await;
 }
