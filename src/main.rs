@@ -60,5 +60,13 @@ async fn my_task() {
         timeout(std::time::Duration::from_secs(3))
     ).await;
 
-    println!("done!");
+
+    println!("now waiting for trigger!");
+
+    on_trigger().await;
+
+    println!("triggered!");
+
+    let () = std::future::pending().await;
+    println!("OOOPS!");
 }
