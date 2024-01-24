@@ -7,7 +7,7 @@ use std::collections::BinaryHeap;
 
 
 slotmap::new_key_type! {
-    pub struct TaskId;
+	pub struct TaskId;
 }
 
 
@@ -125,17 +125,17 @@ struct TimerEntry {
 
 
 impl Ord for TimerEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-    	// Sort by _soonest_ deadline, then by task_id, to stay consistent with Eq
-        self.deadline.cmp(&other.deadline).reverse()
-        	.then_with(|| self.task_id.cmp(&other.task_id))
-    }
+	fn cmp(&self, other: &Self) -> Ordering {
+		// Sort by _soonest_ deadline, then by task_id, to stay consistent with Eq
+		self.deadline.cmp(&other.deadline).reverse()
+			.then_with(|| self.task_id.cmp(&other.task_id))
+	}
 }
 
 impl PartialOrd for TimerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
 }
 
 
@@ -185,7 +185,7 @@ fn get_queues() -> &'static mut Queues {
 pub async fn next_update() {
 	schedule_on_queue(|queues, task_id| {
 		queues.update_queue.push(task_id);
-		None
+		|_| {}
 	}).await
 }
 
@@ -193,7 +193,7 @@ pub async fn next_update() {
 pub async fn on_trigger() {
 	schedule_on_queue(|queues, task_id| {
 		queues.trigger_queue.push(task_id);
-		None
+		|_| {}
 	}).await
 }
 
@@ -208,29 +208,34 @@ pub async fn timeout(duration: Duration) {
 			ticket,
 		});
 
-		Some(ticket)
+		move |queues| queues.timer_queue.retain(move |entry| entry.ticket != ticket)
 	}).await
 }
 
 
-fn schedule_on_queue<F>(f: F) -> ScheduleOnQueue<F>
-	where F: FnOnce(&mut Queues, TaskId) -> Option<usize>
+fn schedule_on_queue<F, D>(f: F) -> ScheduleOnQueue<F, D>
+	where F: FnOnce(&mut Queues, TaskId) -> D
+		, D: FnOnce(&mut Queues) + 'static
 {
 	ScheduleOnQueue(ScheduleOnQueueState::Pending(Some(f)))
 }
 
 
 
-struct ScheduleOnQueue<F>(ScheduleOnQueueState<F>);
+struct ScheduleOnQueue<F, D>(ScheduleOnQueueState<F, D>)
+	where F: FnOnce(&mut Queues, TaskId) -> D
+		, D: FnOnce(&mut Queues) + 'static;
 
-enum ScheduleOnQueueState<F> {
+
+enum ScheduleOnQueueState<F, D> {
 	Pending(Option<F>),
-	Scheduled(Option<usize>),
+	Scheduled(Option<D>),
 }
 
 
-impl<F> Future for ScheduleOnQueue<F>
-	where F: FnOnce(&mut Queues, TaskId) -> Option<usize>
+impl<F, D> Future for ScheduleOnQueue<F, D>
+	where F: FnOnce(&mut Queues, TaskId) -> D
+		, D: FnOnce(&mut Queues) + 'static
 {
 	type Output = ();
 
@@ -240,8 +245,8 @@ impl<F> Future for ScheduleOnQueue<F>
 		match state {
 			ScheduleOnQueueState::Pending(f) => {
 				let current_task = CURRENT_TASK.get().unwrap();
-				let ticket = f.take().unwrap()(get_queues(), current_task);
-				*state = ScheduleOnQueueState::Scheduled(ticket);
+				let on_cancel = f.take().unwrap()(get_queues(), current_task);
+				*state = ScheduleOnQueueState::Scheduled(Some(on_cancel));
 				Poll::Pending
 			}
 
@@ -250,15 +255,23 @@ impl<F> Future for ScheduleOnQueue<F>
 	}
 }
 
-impl<F> Drop for ScheduleOnQueue<F> {
+impl<F, D> Drop for ScheduleOnQueue<F, D>
+	where F: FnOnce(&mut Queues, TaskId) -> D
+		, D: FnOnce(&mut Queues) + 'static
+{
 	fn drop(&mut self) {
 		inner_drop(unsafe { Pin::new_unchecked(self)});
-        fn inner_drop<F>(this: Pin<&mut ScheduleOnQueue<F>>) {
-            if let ScheduleOnQueueState::Scheduled(Some(ticket)) = this.0 {
-            	// TODO(pat.m): generic tickets
-            	get_queues().timer_queue.retain(move |entry| entry.ticket != ticket);
-            }
-        }
+
+		fn inner_drop<F, D>(this: Pin<&mut ScheduleOnQueue<F, D>>)
+			where F: FnOnce(&mut Queues, TaskId) -> D
+				, D: FnOnce(&mut Queues) + 'static
+		{
+			if let ScheduleOnQueueState::Scheduled(on_cancel) = unsafe { &mut this.get_unchecked_mut().0 }
+				&& let Some(on_cancel) = on_cancel.take()
+			{
+				on_cancel(get_queues());
+			}
+		}
 	}
 }
 

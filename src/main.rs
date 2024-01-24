@@ -1,3 +1,5 @@
+#![feature(let_chains)]
+
 use toybox::prelude::*;
 
 mod executor;
@@ -66,7 +68,4 @@ async fn my_task() {
     on_trigger().await;
 
     println!("triggered!");
-
-    let () = std::future::pending().await;
-    println!("OOOPS!");
 }
