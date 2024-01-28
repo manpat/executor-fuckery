@@ -47,35 +47,37 @@ impl Executor {
 
 impl Executor {
 	pub fn poll(&mut self) {
-		// Update timers
-		let now = Instant::now();
-		let Queues{ update_queue, timer_queue, ..  } = self.queues.get_mut();
+		{
+			// Update timers
+			let now = Instant::now();
+			let Queues{ update_queue, timer_queue, ..  } = self.queues.get_mut();
 
-		while let Some(soonest) = timer_queue.peek() {
-			if now < soonest.deadline {
-				break;
+			while let Some(soonest) = timer_queue.peek() {
+				if now < soonest.deadline {
+					break;
+				}
+
+				let Some(TimerEntry{task_id, ..}) = timer_queue.pop() else { unreachable!() };
+				update_queue.push(task_id);
 			}
-
-			let Some(TimerEntry{task_id, ..}) = timer_queue.pop() else { unreachable!() };
-			update_queue.push(task_id);
 		}
 
 		// No mutable references can be held to self.queues while polling futures
-		let update_queue = std::mem::take(&mut self.queues.get_mut().update_queue);
-		self.poll_ids(&update_queue);
+		while let Some(task_id) = self.queues.get_mut().update_queue.pop() {
+			self.poll_task(task_id);
+		}
 	}
 
 	pub fn trigger(&mut self) {
-		let queues = self.queues.get_mut();
-		queues.update_queue.append(&mut queues.trigger_queue);
+		while let Some(task_id) = self.queues.get_mut().trigger_queue.pop() {
+			self.poll_task(task_id);
+		}
 	}
 
-	fn poll_ids(&mut self, task_ids: &[TaskId]) {
+	fn poll_task(&mut self, task_id: TaskId) {
 		use std::task::Context;
 
-		for &task_id in task_ids {
-			let Some(task) = self.tasks.get_mut(task_id) else { continue };
-
+		if let Some(task) = self.tasks.get_mut(task_id) {
 			CURRENT_TASK.set(Some(task_id));
 
 			match task.fut.as_mut().poll(&mut Context::from_waker(&noop_waker())) {
@@ -84,9 +86,9 @@ impl Executor {
 					self.tasks.remove(task_id);
 				}
 			}
-		}
 
-		CURRENT_TASK.set(None);
+			CURRENT_TASK.set(None);
+		}
 	}
 }
 
@@ -185,7 +187,11 @@ fn get_queues() -> &'static mut Queues {
 pub async fn next_update() {
 	schedule_on_queue(|queues, task_id| {
 		queues.update_queue.push(task_id);
-		|_| {}
+		move |queues| {
+			if let Some(position) = queues.update_queue.iter().position(|queued| *queued == task_id) {
+				queues.update_queue.swap_remove(position);
+			}
+		}
 	}).await
 }
 
@@ -193,12 +199,16 @@ pub async fn next_update() {
 pub async fn on_trigger() {
 	schedule_on_queue(|queues, task_id| {
 		queues.trigger_queue.push(task_id);
-		|_| {}
+		move |queues| {
+			if let Some(position) = queues.trigger_queue.iter().position(|queued| *queued == task_id) {
+				queues.trigger_queue.swap_remove(position);
+			}
+		}
 	}).await
 }
 
 pub async fn timeout(duration: Duration) {
-	schedule_on_queue(|queues, task_id| {
+	schedule_on_queue(move |queues, task_id| {
 		let ticket = queues.ticket_counter;
 		queues.ticket_counter = queues.ticket_counter.wrapping_add(1);
 
@@ -221,13 +231,15 @@ fn schedule_on_queue<F, D>(f: F) -> ScheduleOnQueue<F, D>
 }
 
 
-
 struct ScheduleOnQueue<F, D>(ScheduleOnQueueState<F, D>)
 	where F: FnOnce(&mut Queues, TaskId) -> D
 		, D: FnOnce(&mut Queues) + 'static;
 
 
-enum ScheduleOnQueueState<F, D> {
+enum ScheduleOnQueueState<F, D>
+	where F: FnOnce(&mut Queues, TaskId) -> D
+		, D: FnOnce(&mut Queues) + 'static
+{
 	Pending(Option<F>),
 	Scheduled(Option<D>),
 }
@@ -255,22 +267,15 @@ impl<F, D> Future for ScheduleOnQueue<F, D>
 	}
 }
 
-impl<F, D> Drop for ScheduleOnQueue<F, D>
+impl<F, D> Drop for ScheduleOnQueueState<F, D>
 	where F: FnOnce(&mut Queues, TaskId) -> D
 		, D: FnOnce(&mut Queues) + 'static
 {
 	fn drop(&mut self) {
-		inner_drop(unsafe { Pin::new_unchecked(self)});
-
-		fn inner_drop<F, D>(this: Pin<&mut ScheduleOnQueue<F, D>>)
-			where F: FnOnce(&mut Queues, TaskId) -> D
-				, D: FnOnce(&mut Queues) + 'static
+		if let ScheduleOnQueueState::Scheduled(on_cancel) = self
+			&& let Some(on_cancel) = on_cancel.take()
 		{
-			if let ScheduleOnQueueState::Scheduled(on_cancel) = unsafe { &mut this.get_unchecked_mut().0 }
-				&& let Some(on_cancel) = on_cancel.take()
-			{
-				on_cancel(get_queues());
-			}
+			on_cancel(get_queues());
 		}
 	}
 }

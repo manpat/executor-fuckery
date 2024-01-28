@@ -49,23 +49,30 @@ impl toybox::App for App {
 
 
 async fn my_task() {
-    println!("waiting 50 frames...");
+    // println!("waiting 50 frames...");
 
-    for _ in 0..50 {
-        next_update().await;
-    }
+    // for _ in 0..50 {
+    //     next_update().await;
+    // }
 
-    println!("waiting for trigger or 3s timeout...");
+    // println!("waiting for trigger or 3s timeout...");
 
-    when_first(
-        on_trigger(),
-        timeout(std::time::Duration::from_secs(3))
-    ).await;
+    // when_first(
+    //     on_trigger(),
+    //     timeout(std::time::Duration::from_secs(3))
+    // ).await;
 
 
-    println!("now waiting for trigger!");
+    // println!("now waiting for trigger!");
+
+    // on_trigger().await;
+
+    // println!("triggered!");
+
+    when_first(next_update(), on_trigger()).await;
+    println!("triggered!");
 
     on_trigger().await;
 
-    println!("triggered!");
+    println!("woops");
 }
